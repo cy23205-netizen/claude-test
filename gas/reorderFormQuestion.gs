@@ -38,7 +38,7 @@ function run() {
 }
 
 function findOne(form, keyword, type) {
-  const hits = form.getItems(type).filter(it => it.getTitle().includes(keyword));
+  const hits = (type ? form.getItems(type) : form.getItems()).filter(it => it.getTitle().includes(keyword));
   if (hits.length !== 1) {
     throw new Error(`「${keyword}」を含む項目が ${hits.length} 件あります。listItems で確認しキーワードを調整してください。`);
   }
