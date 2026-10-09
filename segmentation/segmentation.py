@@ -146,8 +146,8 @@ def holm(p):
     adj[o] = np.minimum(1, np.maximum.accumulate((m - np.arange(m)) * p[o]))
     return adj
 
-def cross(var, keep_cols=None, drop_rows=()):
-    t = pd.crosstab(df['セグメント'], df[var])
+def cross(var, keep_cols=None, drop_rows=(), row='セグメント'):
+    t = pd.crosstab(df[row], df[var])
     full = t.copy(); full['合計'] = full.sum(1)
     tt = t.drop(index=list(drop_rows), errors='ignore')
     if keep_cols is not None: tt = tt[keep_cols]
@@ -176,6 +176,13 @@ crosses = {
     # 撮影頻度はクラスタリングの投入変数・Step1の分割基準なので、関連が出るのは当然（記述用）
     '撮影頻度': cross('撮影頻度', ['月に数回', '週1回くらい', '週に数回', 'ほぼ毎日'], drop_rows=['ほとんど撮らない層']),
 }
+# セグメントを介さない、撮影頻度 × 属性のクロス集計
+freq_crosses = {
+    '体験タイプ': cross('体験タイプ', ['T1', 'T2', 'T3', 'T4'], row='撮影頻度'),
+    '性別': cross('性別', ['男性', '女性'], row='撮影頻度'),
+    '職業': cross('職業', row='撮影頻度'),
+    '年齢層': cross('年齢層', row='撮影頻度'),
+}
 
 # ---------- 出力 ----------
 with pd.ExcelWriter(f'{OUT}/segmentation_results.xlsx', engine='xlsxwriter') as w:
@@ -190,8 +197,8 @@ with pd.ExcelWriter(f'{OUT}/segmentation_results.xlsx', engine='xlsxwriter') as 
     sil.round(3).to_excel(w, sheet_name='S4 シルエット')
     agree.to_excel(w, sheet_name='S4 ウォード×kmeans')
     r0 = 0
-    for nm, (full, pct, res, post, stat) in crosses.items():
-        sh = f'S5 {nm}'
+    for nm, (full, pct, res, post, stat) in [*crosses.items(), *[(f'頻度×{k}', v) for k, v in freq_crosses.items()]]:
+        sh = f'S5 {nm}' if not nm.startswith('頻度×') else f'S6 {nm}'
         pd.DataFrame({'値': stat}).round(4).to_excel(w, sheet_name=sh, startrow=0)
         full.to_excel(w, sheet_name=sh, startrow=10); pct.round(3).to_excel(w, sheet_name=sh, startrow=20)
         res.round(2).to_excel(w, sheet_name=sh, startrow=30); post.round(4).to_excel(w, sheet_name=sh, startrow=40)
@@ -270,5 +277,6 @@ fig.tight_layout(); fig.savefig(f'{OUT}/fig5_type_by_segment.png', dpi=150); plt
 pd.set_option('display.width', 250); pd.set_option('display.max_columns', 30)
 print(fa_tab.round(3).T.to_string()); print(load.round(2)); print(q3_eig.round(3).head(4)); print(q3_cat.round(2))
 print(sil.round(3)); print(agree); print(prof.round(2).to_string()); print(purp_all.round(2).to_string()); print(freq_tab.round(2).to_string())
-for nm, (full, pct, res, post, stat) in crosses.items():
+for nm, (full, pct, res, post, stat) in [*crosses.items(), *[(f'頻度×{k}', v) for k, v in freq_crosses.items()]]:
+    print(full.to_string()) if nm.startswith('頻度×') else None
     print('\n##', nm, {k: round(float(v), 4) for k, v in stat.items()}); print(res.round(2).to_string()); print(post.round(3).to_string())
