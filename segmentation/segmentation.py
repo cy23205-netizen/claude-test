@@ -4,11 +4,11 @@ Step1 撮影頻度「ほとんどない」層を先に分離
 Step2 考え方8項目の因子分析（最尤法・プロマックス）→ 因子得点
 Step3 非日常の撮影目的（9選択肢）の数量化III類 → サンプルスコア
 Step4 標準化した変数でウォード法 → シルエット値でクラスター数決定 → k-meansで微調整
-Step5 セグメント × 体験タイプ・性別・職業・年齢層のクロス集計
+Step5 セグメント × 体験タイプ・性別・職業・年齢層のクロス集計（フィッシャーの正確確率検定, R が必要）
 
 使い方: python segmentation.py <回答データ.xlsx> <出力ディレクトリ>
 """
-import sys, warnings
+import sys, warnings, subprocess
 import numpy as np, pandas as pd
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -130,14 +130,20 @@ df['年齢層'] = pd.cut(age, [0, 20, 21, 22, 200], labels=['20歳以下', '21�
 df['体験タイプ'] = df['タイプ'].replace({'不明': 'どれも行っていない'})
 df['性別'] = df[col('1-2')]; df['職業'] = df[col('1-3')]
 
-def perm_chi2(tab, n_perm=10000):
-    obs = chi2_contingency(tab, correction=False)[0]
-    rows = np.repeat(np.arange(tab.shape[0]), tab.sum(1)); cols = np.repeat(np.arange(tab.shape[1]), tab.sum(0))
-    hits = 0
-    for _ in range(n_perm):
-        t = np.zeros(tab.shape); np.add.at(t, (rows, RNG.permutation(cols)), 1)
-        hits += chi2_contingency(t, correction=False)[0] >= obs - 1e-9
-    return (hits + 1) / (n_perm + 1)
+def r_fisher(tabs):
+    """R の fisher.test（ネットワークアルゴリズムによる正確検定, Freeman-Halton 拡張）で p 値を返す."""
+    code = 'x <- scan("stdin", quiet=TRUE); out <- c(); i <- 1\n' \
+           'while (i <= length(x)) { r <- x[i]; k <- x[i+1]; m <- matrix(x[(i+2):(i+1+r*k)], r, k, byrow=TRUE)\n' \
+           '  out <- c(out, fisher.test(m, workspace=2e8)$p.value); i <- i + 2 + r*k }\n' \
+           'cat(sprintf("%.10g", out), sep="\\n")'
+    inp = ' '.join(' '.join(map(str, [t.shape[0], t.shape[1], *t.astype(int).ravel()])) for t in tabs)
+    res = subprocess.run(['Rscript', '-e', code], input=inp, capture_output=True, text=True, check=True)
+    return [float(v) for v in res.stdout.split()]
+
+def holm(p):
+    p = np.asarray(p); o = np.argsort(p); m = len(p); adj = np.empty(m)
+    adj[o] = np.minimum(1, np.maximum.accumulate((m - np.arange(m)) * p[o]))
+    return adj
 
 def cross(var, keep_cols=None, drop_rows=()):
     t = pd.crosstab(df['セグメント'], df[var])
@@ -146,13 +152,20 @@ def cross(var, keep_cols=None, drop_rows=()):
     if keep_cols is not None: tt = tt[keep_cols]
     tt = tt.loc[tt.sum(1) > 0, tt.sum(0) > 0]
     a = tt.values.astype(float)
-    chi, p, dof, ex = chi2_contingency(a, correction=False)
+    chi, _, dof, ex = chi2_contingency(a, correction=False)
     N = a.sum(); rs = a.sum(1, keepdims=True) / N; cs = a.sum(0, keepdims=True) / N
     adj = (a - ex) / np.sqrt(ex * (1 - rs) * (1 - cs))
     res = pd.DataFrame(adj, index=tt.index, columns=tt.columns)
-    stat = {'検定対象n': int(N), 'χ²': chi, 'df': dof, '漸近p': p, '並べ替え検定p': perm_chi2(a.astype(int)),
-            "Cramér's V": np.sqrt(chi / (N * (min(a.shape) - 1))), '期待度数<5のセル割合': (ex < 5).mean()}
-    return full, (t.T / t.sum(1)).T, res, stat
+    # 下位検定: 各セル「そのセグメントか否か × そのカテゴリーか否か」の 2×2 フィッシャー検定（Holm 補正）
+    cells = [(i, j) for i in range(a.shape[0]) for j in range(a.shape[1])]
+    sub = [np.array([[a[i, j], a[i].sum() - a[i, j]], [a[:, j].sum() - a[i, j], N - a[i].sum() - a[:, j].sum() + a[i, j]]])
+           for i, j in cells]
+    ps = r_fisher([a] + sub)
+    post = pd.DataFrame(np.nan, index=tt.index, columns=tt.columns)
+    for (i, j), q in zip(cells, holm(ps[1:])): post.iat[i, j] = q
+    stat = {'検定対象n': int(N), 'フィッシャーの正確確率検定 p': ps[0], "Cramér's V": np.sqrt(chi / (N * (min(a.shape) - 1))),
+            '（参考）χ²': chi, '（参考）df': dof, '期待度数<5のセル割合': (ex < 5).mean()}
+    return full, (t.T / t.sum(1)).T, res, post, stat
 
 crosses = {
     '体験タイプ': cross('体験タイプ', ['T1', 'T2', 'T3', 'T4']),
@@ -174,13 +187,14 @@ with pd.ExcelWriter(f'{OUT}/segmentation_results.xlsx', engine='xlsxwriter') as 
     sil.round(3).to_excel(w, sheet_name='S4 シルエット')
     agree.to_excel(w, sheet_name='S4 ウォード×kmeans')
     r0 = 0
-    for nm, (full, pct, res, stat) in crosses.items():
+    for nm, (full, pct, res, post, stat) in crosses.items():
         sh = f'S5 {nm}'
         pd.DataFrame({'値': stat}).round(4).to_excel(w, sheet_name=sh, startrow=0)
         full.to_excel(w, sheet_name=sh, startrow=10); pct.round(3).to_excel(w, sheet_name=sh, startrow=20)
-        res.round(2).to_excel(w, sheet_name=sh, startrow=30)
+        res.round(2).to_excel(w, sheet_name=sh, startrow=30); post.round(4).to_excel(w, sheet_name=sh, startrow=40)
         ws = w.sheets[sh]
-        for rr, t in [(9, '度数'), (19, '行%（セグメント内の構成比）'), (29, '調整済み残差（|z|>1.96で有意）')]: ws.write(rr, 0, t)
+        for rr, t in [(9, '度数'), (19, '行%（セグメント内の構成比）'), (29, '調整済み残差（記述用）'),
+                      (39, '下位検定: セルごとの2×2フィッシャー検定 p（Holm補正）')]: ws.write(rr, 0, t)
     out_ids = pd.DataFrame({'回答No': df.index + 1, 'セグメント': df['セグメント'], '体験タイプ': df['体験タイプ']})
     for nm, z in zip(VNAME, V.T): out_ids.loc[d.index, nm] = z
     out_ids.to_excel(w, sheet_name='回答者別 所属', index=False)
@@ -253,5 +267,5 @@ fig.tight_layout(); fig.savefig(f'{OUT}/fig5_type_by_segment.png', dpi=150); plt
 pd.set_option('display.width', 250); pd.set_option('display.max_columns', 30)
 print(fa_tab.round(3).T.to_string()); print(load.round(2)); print(q3_eig.round(3).head(4)); print(q3_cat.round(2))
 print(sil.round(3)); print(agree); print(prof.round(2).to_string()); print(purp_all.round(2).to_string()); print(freq_tab.round(2).to_string())
-for nm, (full, pct, res, stat) in crosses.items():
-    print('\n##', nm, {k: round(v, 4) for k, v in stat.items()}); print(full.to_string()); print(res.round(2).to_string())
+for nm, (full, pct, res, post, stat) in crosses.items():
+    print('\n##', nm, {k: round(float(v), 4) for k, v in stat.items()}); print(res.round(2).to_string()); print(post.round(3).to_string())
