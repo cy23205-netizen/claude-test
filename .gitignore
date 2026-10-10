@@ -1,0 +1,6 @@
+# 生データ（メールアドレス・自由記述を含むためコミットしない）
+data/
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
